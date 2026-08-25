@@ -1,0 +1,162 @@
+MUSIC ANALYSIS PROJECT — SUMMARY
+==================================
+(Everything built so far, in the order it happened.)
+
+
+1. THE ROUTER (main.py)
+------------------------
+A terminal menu that browses the subprojects/ folder tree and lets you run
+whatever script you land on, so this can grow into a multi-subproject
+codebase without a growing pile of "which script do I run again?" tribal
+knowledge.
+
+- Arrow-key navigation (Up/Down or w/s, Enter to select, Left/Backspace to
+  go back, Esc/q to quit). The selected item is highlighted with reverse
+  video (ANSI escape codes).
+- Falls back to a plain numbered-input menu automatically when stdin isn't
+  a real terminal, or when running under Git Bash/MSYS.
+  NITTY GRITTY: this fallback isn't just for piped/non-interactive use.
+  Git Bash's mintty pty reports isatty()==True even though it doesn't give
+  Windows' msvcrt module a real console handle, so arrow-key reads would
+  silently hang forever. Caught this by actually reproducing the hang,
+  then fixed it by detecting the MSYSTEM environment variable and routing
+  to the plain fallback whenever it's set.
+- Screen clears before every menu render in both modes, so the terminal
+  doesn't fill up with stale menus as you navigate.
+- Folder/file discovery is fully automatic: ANY .py file directly inside a
+  subprojects/ folder becomes a runnable menu entry (not just a hardcoded
+  "main.py"). A file opts out of the menu by prefixing its name with "."
+  or "_" (e.g. _shared.py), or by adding a "# router:skip" comment in its
+  first ~20 lines. Same underscore/dot rule applies to folders.
+- Each script runs as its own subprocess (python <script>.py), with its
+  cwd set to its own folder, so subprojects stay isolated from each other.
+
+
+2. AUDIO ANALYSIS SCRIPTS (subprojects/statistic_from_audio/)
+----------------------------------------------------------------
+Two analysis tools, each in its own folder (harmonics/, amplitude/),
+following the router's one-script-per-folder convention. Both were
+originally under a folder called audio_analysis/ before being reorganized
+into statistic_from_audio/ to match folders the user had already started.
+
+harmonics/main.py — FFT harmonic analysis
+  - Hann-windows the signal, runs numpy's rfft, and reports the estimated
+    fundamental frequency plus up to 10 harmonics (frequency + relative
+    amplitude), with a spectrum plot marking each one.
+  - NITTY GRITTY / THE INTERESTING BUG: the first version picked the
+    single loudest frequency bin as "the fundamental." That works on a
+    clean synthetic tone but fails on real piano notes, because a piano's
+    2nd harmonic is very often louder than its true fundamental — the
+    naive approach kept reporting notes exactly one octave too high.
+  - THE FIX: rewrote fundamental detection using a Harmonic Product
+    Spectrum (HPS). Instead of asking "which single bin is loudest?" it
+    asks "which frequency has the strongest energy across its whole
+    harmonic series (f, 2f, 3f)?" — the true fundamental's bin gets
+    reinforced by every harmonic in the product, while a false octave-up
+    candidate only lines up with every other one.
+  - TUNING: HPS defaults to multiplying 5 harmonics together in most
+    references, but testing against real piano notes showed 3 works
+    better here. Piano string partials drift progressively sharper of
+    exact integer multiples the higher up you go (a real physical effect
+    called inharmonicity, from string stiffness) — including the 4th and
+    5th harmonic in the product added noise instead of signal. Dropping
+    the count to 3 raised accuracy on a real-note test set from 4/8 to
+    6/8 correct fundamentals.
+
+amplitude/main.py — amplitude envelope analysis
+  - Computes an RMS envelope in 10ms frames and estimates the note's
+    shape from it: attack (silence -> peak) and decay (peak -> the level
+    dropping back below 5% of the peak). Plots the envelope with both
+    boundaries marked.
+  - NITTY GRITTY: originally modeled as a full ADSR (attack/decay/
+    sustain/release), like a synthesizer envelope. Removed the sustain
+    and release stages entirely, on purpose — a piano note is a struck,
+    continuously-decaying sound with no true sustain plateau the way a
+    bowed or wind instrument has one. Forcing an ADSR model onto a piano
+    note means guessing at a plateau that isn't really there. Attack +
+    decay is what actually matches the physics.
+
+_shared.py (duplicated identically into both harmonics/ and amplitude/,
+matching the project's existing pattern of each script folder being
+self-contained)
+  - Loads a WAV file as float64 mono samples, downmixing stereo and
+    normalizing integer PCM to [-1, 1].
+  - COOL THING: instead of asking the user to type a file path, it
+    reaches back into the project root and imports choose() directly out
+    of main.py — the exact same arrow-key/numbered menu the router itself
+    uses — so picking a WAV file feels identical to picking a subproject.
+    It finds the project root by walking up the directory tree looking
+    for a folder that has both main.py and subprojects/ in it, so it
+    isn't hardcoded to a specific folder depth.
+
+
+3. THE "Audio Recordings" FOLDER
+------------------------------------
+A folder at the project root where WAV files go. Both analysis scripts
+list its contents through the shared picker above instead of prompting for
+a path — drop a file in, it shows up in the menu, no config needed.
+
+
+4. TEST DATA — IMPORTED FROM THE MAESTRO DATASET
+------------------------------------------------------
+8 real single piano notes (not synthetic) now live in Audio Recordings/,
+pulled from Google Magenta's MAESTRO v3.0.0 dataset:
+
+  maestro_01_G2.wav    maestro_05_A#4.wav
+  maestro_02_D4.wav    maestro_06_D#5.wav
+  maestro_03_D#4.wav   maestro_07_B3.wav
+  maestro_04_D4.wav    maestro_08_G4.wav
+
+Source performance: J.S. Bach, Prelude and Fugue in G Minor (WTC II,
+BWV 885), a 2011 recording — the single shortest recording in the entire
+MAESTRO v3.0.0 dataset (45 seconds), chosen specifically to keep the
+download small.
+
+COOL THING / THE NITTY GRITTY: MAESTRO doesn't host individual audio files
+you can just download — the only options are one 108GB zip containing
+every performance, or TensorFlow TFRecord shards. Downloading 108GB for
+one 45-second clip wasn't happening. Instead, this used the fact that (a)
+ZIP files store a central directory that lets you look up any single
+file's exact byte range without reading the rest of the archive, and (b)
+Google Cloud Storage supports HTTP range requests. Using the `remotezip`
+library, the target audio + MIDI files were extracted directly out of the
+108GB archive in about 2.5 seconds, touching only the ~8MB actually
+needed.
+
+The MIDI file (aligned to the audio, sample-accurate) was then parsed with
+`mido` to find note onset/offset times, rank notes by how much clear time
+exists before the next note starts, and slice out the 8 most isolated
+ones as individual WAV clips (~50ms of pre-roll before each onset, capped
+at 2 seconds).
+
+CONCLUSION FROM TESTING AGAINST THIS DATA: running harmonics/main.py
+against all 8 notes and comparing against their known MIDI pitch, 6 of 8
+fundamentals were detected correctly after the HPS fix. The 2 that still
+fail (A#4, D#5) aren't a tunable-parameter problem — they fail at every
+harmonic-count setting tried. The real cause: this recording uses heavy
+sustain pedal (one note in the piece rings for over 7 seconds), so other
+undamped strings resonate in sympathy and leak real acoustic energy into
+the clip that has nothing to do with the target note's own harmonic
+series. No amount of spectral-domain tuning fixes that — it would need a
+pitch tracker that also knows the note's onset/duration, or accepting
+that pedaled multi-note recordings are inherently messier than isolated
+single-note samples.
+
+This turned out not to matter much: the user clarified the actual test
+target is isolated single piano notes (like the separately-cited Kaggle
+"Piano Recordings Dataset"), not full pedaled performances — so the
+pedal-resonance failure mode isn't representative of the real use case,
+and wasn't chased further.
+
+
+THINGS WORTH REMEMBERING GOING FORWARD
+-------------------------------------------
+- Piano notes: struck/decaying, no sustain plateau, slightly inharmonic
+  overtones. Both analysis scripts are already tuned around this.
+- The router's plain-menu fallback under Git Bash/MSYS isn't cosmetic —
+  it's a hang fix. Don't remove that check.
+- harmonics/main.py's HPS is deliberately limited to 3 harmonics; that
+  number came from testing against real notes, not a guess. Don't bump it
+  back up without re-testing against real samples.
+- Pedal/polyphonic resonance is an explicitly out-of-scope failure mode
+  for this project's current goal (single-note testing).

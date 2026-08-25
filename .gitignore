@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+
+# Audio test data - binary, not source-controlled
+Audio Recordings/*.wav
+
+# OS cruft
+.DS_Store
+Thumbs.db
