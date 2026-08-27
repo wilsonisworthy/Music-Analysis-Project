@@ -34,7 +34,8 @@ def _enable_ansi_on_windows():
 
 
 def read_key():
-    """Block for one keypress, return 'up'/'down'/'enter'/'back'/'quit'/None."""
+    """Block for one keypress, return 'up'/'down'/'enter'/'back'/'quit'/
+    'toggle'/'all'/None. toggle/all are only meaningful in choose_multi()."""
     if os.name == "nt":
         import msvcrt
 
@@ -54,6 +55,10 @@ def read_key():
             return "up"
         if ch in (b"s", b"S"):
             return "down"
+        if ch == b" ":
+            return "toggle"
+        if ch in (b"a", b"A"):
+            return "all"
         return None
     else:
         import termios
@@ -85,13 +90,20 @@ def read_key():
                 return "up"
             if ch in ("s", "S"):
                 return "down"
+            if ch == " ":
+                return "toggle"
+            if ch in ("a", "A"):
+                return "all"
             return None
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 def clear_screen():
-    print("\033[2J\033[H", end="")
+    # os.system("cls"/"clear") resets the actual console buffer, unlike the
+    # ANSI "\033[2J" escape, which only clears the visible viewport and
+    # leaves everything still sitting in scrollback.
+    os.system("cls" if os.name == "nt" else "clear")
 
 
 def render_menu(title, items, selected):
@@ -128,6 +140,98 @@ def choose_plain(title, items):
         return int(choice) - 1
     print("Invalid choice, try again.")
     return choose_plain(title, items)
+
+
+def render_multi_menu(title, items, selected, checked):
+    clear_screen()
+    print(title)
+    print("-" * max(len(title), 40))
+    for i, label in enumerate(items):
+        box = "[x]" if checked[i] else "[ ]"
+        line = f"{box} {label}"
+        if i == selected:
+            print(f"\033[7m> {line}\033[0m")
+        else:
+            print(f"  {line}")
+    print()
+    n_checked = sum(checked)
+    print(f"{n_checked} selected")
+    print("Up/Down move   Space toggle   a toggle all   Enter confirm   Esc/q cancel")
+
+
+def _parse_index_ranges(text, count):
+    """Parse '1,3,5-8' style input into a sorted list of 0-based indices."""
+    indices = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, _, hi = part.partition("-")
+            if not (lo.strip().isdigit() and hi.strip().isdigit()):
+                return None
+            lo, hi = int(lo), int(hi)
+            if lo > hi or lo < 1 or hi > count:
+                return None
+            indices.update(range(lo - 1, hi))
+        elif part.isdigit():
+            n = int(part)
+            if not (1 <= n <= count):
+                return None
+            indices.add(n - 1)
+        else:
+            return None
+    return sorted(indices)
+
+
+def choose_multi_plain(title, items):
+    """Numbered-input fallback for non-interactive stdin. Accepts comma-
+    separated numbers/ranges (e.g. '1,3,5-8') or 'all'."""
+    clear_screen()
+    print(f"\n{title}")
+    print("-" * max(len(title), 40))
+    for i, label in enumerate(items, start=1):
+        print(f"  {i}. {label}")
+    print("  q. Quit")
+    try:
+        choice = input("\nSelect (e.g. 1,3,5-8 or 'all'): ").strip().lower()
+    except EOFError:
+        return "quit"
+    if choice in ("q", "quit"):
+        return "quit"
+    if choice == "all":
+        return list(range(len(items)))
+    parsed = _parse_index_ranges(choice, len(items))
+    if parsed:
+        return parsed
+    print("Invalid choice, try again.")
+    return choose_multi_plain(title, items)
+
+
+def choose_multi(title, items):
+    """Multi-select menu. Returns a list of 0-based indices, or 'quit'."""
+    if not sys.stdin.isatty() or os.environ.get("MSYSTEM"):
+        return choose_multi_plain(title, items)
+
+    selected = 0
+    checked = [False] * len(items)
+    while True:
+        render_multi_menu(title, items, selected, checked)
+        key = read_key()
+        if key == "up":
+            selected = (selected - 1) % len(items)
+        elif key == "down":
+            selected = (selected + 1) % len(items)
+        elif key == "toggle":
+            checked[selected] = not checked[selected]
+        elif key == "all":
+            all_checked = all(checked)
+            checked = [not all_checked] * len(items)
+        elif key == "enter":
+            picked = [i for i, c in enumerate(checked) if c]
+            return picked if picked else [selected]
+        elif key in ("back", "quit"):
+            return "quit"
 
 
 def choose(title, items):

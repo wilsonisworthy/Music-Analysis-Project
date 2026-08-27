@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 
 # Audio test data - binary, not source-controlled
-Audio Recordings/*.wav
+*.wav
 
 # OS cruft
 .DS_Store

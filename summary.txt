@@ -30,6 +30,12 @@ knowledge.
   first ~20 lines. Same underscore/dot rule applies to folders.
 - Each script runs as its own subprocess (python <script>.py), with its
   cwd set to its own folder, so subprojects stay isolated from each other.
+- UPDATE (2026-08-27): added a multi-select menu (choose_multi(), next to
+  the original single-select choose()) -- Space toggles the highlighted
+  item, 'a' toggles all, Enter confirms; the plain fallback accepts
+  comma-separated numbers/ranges ("1,3,5-8") or "all". Built so the
+  compare/ subproject (section 6) could let the user pick many recordings
+  at once instead of one at a time.
 
 
 2. AUDIO ANALYSIS SCRIPTS (subprojects/statistic_from_audio/)
@@ -39,29 +45,57 @@ following the router's one-script-per-folder convention. Both were
 originally under a folder called audio_analysis/ before being reorganized
 into statistic_from_audio/ to match folders the user had already started.
 
-harmonics/main.py — FFT harmonic analysis
-  - Hann-windows the signal, runs numpy's rfft, and reports the estimated
-    fundamental frequency plus up to 10 harmonics (frequency + relative
-    amplitude), with a spectrum plot marking each one.
-  - NITTY GRITTY / THE INTERESTING BUG: the first version picked the
-    single loudest frequency bin as "the fundamental." That works on a
-    clean synthetic tone but fails on real piano notes, because a piano's
-    2nd harmonic is very often louder than its true fundamental — the
-    naive approach kept reporting notes exactly one octave too high.
-  - THE FIX: rewrote fundamental detection using a Harmonic Product
-    Spectrum (HPS). Instead of asking "which single bin is loudest?" it
-    asks "which frequency has the strongest energy across its whole
-    harmonic series (f, 2f, 3f)?" — the true fundamental's bin gets
-    reinforced by every harmonic in the product, while a false octave-up
-    candidate only lines up with every other one.
-  - TUNING: HPS defaults to multiplying 5 harmonics together in most
-    references, but testing against real piano notes showed 3 works
-    better here. Piano string partials drift progressively sharper of
-    exact integer multiples the higher up you go (a real physical effect
-    called inharmonicity, from string stiffness) — including the 4th and
-    5th harmonic in the product added noise instead of signal. Dropping
-    the count to 3 raised accuracy on a real-note test set from 4/8 to
-    6/8 correct fundamentals.
+harmonics/main.py — timbre-over-time analysis (rewritten; see history below)
+  - CURRENT VERSION: deliberately does NOT report a fundamental frequency
+    or note name at all (the user pointed out the filename already tells
+    you the note). Instead it answers "how does the tone color change
+    while the note plays?" via an STFT (a Fourier transform computed
+    repeatedly over sliding time windows = a spectrogram) and a per-frame
+    spectral centroid ("brightness" — the amplitude-weighted average
+    frequency; higher means more energy in the upper harmonics). Output:
+    a spectrogram plot with the brightness curve overlaid, a separate
+    brightness-vs-time plot, and a one-line printed verdict (brighter /
+    darker / roughly constant, with a fitted percent change).
+  - THE BUG CAUGHT HERE: the first version of this compared brightness in
+    the first 2%-of-peak-energy window vs a hardcoded threshold and found
+    every note "got brighter" by up to +236%. That was fake. As a real
+    note's signal decays toward silence, a flat background noise floor
+    (room/mic noise) becomes a bigger share of each frame's total energy;
+    since that floor isn't bass-weighted the way a piano tone is, it
+    drags the measured centroid upward as the real signal fades out —
+    the "brightening" was mostly the note fading into noise, not the
+    note's actual timbre changing.
+  - THE FIX: gate frames on SNR above a measured noise floor (taken from
+    the silence just before each note's attack) instead of a fixed
+    fraction of peak energy, and require 15dB above that floor before
+    trusting a frame's centroid. Also switched the trend calculation from
+    a noisy "average the first/last 10%" comparison to a proper linear
+    fit across every valid frame, which is far less sensitive to a few
+    noisy points at either edge.
+  - HONEST RESULT AFTER THE FIX: even with the noise-floor bug gone, 6 of
+    8 test notes still measurably brighten over their reliably-audible
+    duration (2 stay flat). That looks backwards from the common "notes
+    get warmer as they decay" intuition, but that intuition is really
+    about the long, low-SNR decay tail this fix now correctly excludes as
+    unmeasurable, not the portion actually being measured. Reported as
+    real data rather than forced to match the intuition. Not fully
+    explained yet — worth a literature check on piano transient behavior
+    if pursued further.
+  - EARLIER VERSION (replaced, kept here since the debugging process is
+    itself informative): originally reported a single estimated
+    fundamental frequency + up to 10 harmonics from one whole-clip FFT.
+    Had its own bug — picking the single loudest bin as "the
+    fundamental" fails on real piano notes because the 2nd harmonic is
+    often louder than the true fundamental, causing consistent
+    one-octave-too-high errors. Was fixed with a Harmonic Product
+    Spectrum (multiply the spectrum by itself decimated by 2x, 3x, ...,
+    so the true fundamental's bin gets reinforced by every harmonic
+    while a false octave-up candidate only lines up with every other
+    one), tuned to 3 harmonics instead of the textbook 5 (piano partials
+    drift sharp of exact integer multiples higher up, so including more
+    of them added noise). That approach was abandoned entirely once the
+    user clarified they didn't want fundamental/note detection at all —
+    it's superseded, not merged with the current version.
 
 amplitude/main.py — amplitude envelope analysis
   - Computes an RMS envelope in 10ms frames and estimates the note's
@@ -88,19 +122,45 @@ self-contained)
     It finds the project root by walking up the directory tree looking
     for a folder that has both main.py and subprojects/ in it, so it
     isn't hardcoded to a specific folder depth.
+  - UPDATED (2026-08-27, first pass): scanned TWO folders (Audio
+    Recordings/ and Sample Recordings/, both directly at the project
+    root) and merged their contents into one flat picker list, each
+    entry labeled "<folder>/<filename>".
+  - UPDATED AGAIN (2026-08-27, same day): the user nested both of those
+    under one parent, Recordings/, and asked for "the folder structure
+    method" instead of a flat merged list. select_wav()/select_wavs()
+    were rewritten to browse Recordings/ the same folder-by-folder way
+    the router (main.py) browses subprojects/ -- descend into
+    subfolders via the arrow-key/plain menu, land on files. For multi-
+    select specifically, since you can't cleanly mix "descend into a
+    folder" actions with per-item checkboxes in one menu, navigation
+    stays single-select until you reach a folder that actually has WAV
+    files in it; that folder gets an extra "[ Select from the N file(s)
+    here ]" menu entry which switches to choose_multi() scoped to just
+    that folder. So cross-folder multi-select (picking some files from
+    Sample Recordings/ AND some from Audio Recordings/ in one go) isn't
+    supported -- you multi-select within one folder at a time. Nothing
+    asked for that yet; worth revisiting if it comes up.
 
 
-3. THE "Audio Recordings" FOLDER
+3. THE "Recordings" FOLDER TREE
 ------------------------------------
-A folder at the project root where WAV files go. Both analysis scripts
-list its contents through the shared picker above instead of prompting for
-a path — drop a file in, it shows up in the menu, no config needed.
+A folder tree at the project root where WAV files go, browsed the same
+folder-by-folder way as subprojects/ (see section 1's later update).
+Currently: Recordings/Sample Recordings/ (48 downloaded notes, section 5)
+and Recordings/Audio Recordings/ (empty, reserved for something else).
+Nest folders however makes sense -- e.g. by instrument, by dynamic, by
+source -- the picker just follows the tree.
 
 
-4. TEST DATA — IMPORTED FROM THE MAESTRO DATASET
-------------------------------------------------------
-8 real single piano notes (not synthetic) now live in Audio Recordings/,
-pulled from Google Magenta's MAESTRO v3.0.0 dataset:
+4. TEST DATA, ROUND 1 — MAESTRO DATASET (superseded, see section 5)
+------------------------------------------------------------------------
+8 real piano notes were first pulled from Google Magenta's MAESTRO v3.0.0
+dataset. These have since been replaced (section 5) because MAESTRO is
+full multi-note performances, not isolated single notes, and heavy
+sustain-pedal use in the source recording caused real acoustic bleed
+between notes. Keeping this section as a record of what was tried and
+learned.
 
   maestro_01_G2.wav    maestro_05_A#4.wav
   maestro_02_D4.wav    maestro_06_D#5.wav
@@ -142,11 +202,110 @@ pitch tracker that also knows the note's onset/duration, or accepting
 that pedaled multi-note recordings are inherently messier than isolated
 single-note samples.
 
-This turned out not to matter much: the user clarified the actual test
-target is isolated single piano notes (like the separately-cited Kaggle
-"Piano Recordings Dataset"), not full pedaled performances — so the
-pedal-resonance failure mode isn't representative of the real use case,
-and wasn't chased further.
+The user clarified the actual test target is isolated single piano notes,
+not full pedaled performances — so MAESTRO was the wrong kind of dataset
+for this project, regardless of the extraction trick working perfectly.
+
+
+5. TEST DATA, ROUND 2 — UNIVERSITY OF IOWA SINGLE NOTES (current)
+-----------------------------------------------------------------------
+The MAESTRO clips were fully replaced with genuinely isolated single
+piano notes — no pedal, no other notes overlapping, no performance
+context at all. Started with 8 (C and G across octaves 2-5), then
+expanded to the full chromatic set: all 12 notes across 4 octaves
+(2 through 5), 48 files total, piano_single_<note><octave>.wav
+(e.g. piano_single_C2.wav ... piano_single_B5.wav, flats spelled as
+Db/Eb/Gb/Ab/Bb to match the source archive's naming).
+
+Source: the University of Iowa Electronic Music Studios instrument
+sample archive (theremin.music.uiowa.edu) — a long-standing, freely
+downloadable set of single-note instrument recordings used widely in
+audio research. Each note was recorded in isolation specifically for
+sampling purposes, at mezzo-forte dynamic. (The Kaggle "Piano Recordings
+Dataset" cited earlier would have been a more direct match, but Kaggle
+requires an account + API token to download even public datasets, which
+wasn't available in this session — Iowa's archive needs no login at all.)
+
+NITTY GRITTY: the raw files are AIFF format, not WAV, and are extremely
+long — around 13 to 74 seconds each, mostly natural decay tail trailing
+off toward silence. Converted to WAV with the `soundfile` library, and
+trimmed each note individually: computed a quick RMS envelope, found
+where the level drops below 3% of the peak, and cut there plus a small
+buffer (capped at 6 seconds). Final clips range from about 1.5s (fast-
+decaying upper-register notes) to 6.9s (low notes, which naturally ring
+longer) — that spread by itself is a real, physically-correct result:
+lower piano strings sustain audibly much longer than higher ones. All
+48 files were batch-run through both analysis scripts afterward with
+zero crashes.
+
+CONCLUSION FROM TESTING AGAINST THIS DATA (against the first 8 notes,
+back when harmonics/main.py still reported a fundamental frequency --
+see section 2, that whole approach has since been replaced and this
+finding no longer applies to the current script, kept here as history):
+6 of 8 fundamentals detected correctly, same score as the MAESTRO round,
+but with a different and more informative failure pattern — both
+failures (C2, G2) were octave errors on the two *lowest* notes
+specifically, not scattered across the range. That pointed at a known
+phenomenon: on a real piano, the true fundamental of a low bass string
+is often physically weaker than its own upper harmonics (a soundboard/
+string-coupling effect), which can outvote even an octave-error-
+resistant detector in the bass register. Never re-tested against the
+full 48-note set, and no longer testable at all now that the script
+doesn't report a fundamental — noted here in case fundamental detection
+ever comes back.
+
+
+6. CROSS-ANALYSIS ACROSS RECORDINGS (subprojects/statistic_from_audio/compare/)
+---------------------------------------------------------------------------------
+Added because analyzing one file at a time doesn't reveal trends across
+the keyboard. compare/main.py uses the router's multi-select menu
+(section 1) to pick any number of recordings, then asks which analysis
+to run -- Amplitude, Harmonics, or Both -- and lays out each selected
+recording's own plot(s) side by side (one row per recording, sorted by
+pitch when the filename ends in a note name; columns = the analysis
+type(s) picked), the same visuals amplitude/main.py and harmonics/
+main.py produce individually, just all on one page instead of one file
+at a time. A plain printed table (attack, decay, brightness start/end
+per recording) prints below the plots -- not another graph.
+
+UPDATE (2026-08-27): originally this reduced everything to two
+aggregate trend-line plots (attack/decay vs. pitch, brightness vs.
+pitch) plus a Pearson-correlation summary. Replaced entirely at the
+user's request -- they wanted to actually SEE each recording's detailed
+plot side by side (matching what the individual scripts show), not just
+a pitch-vs-metric reduction, with the numbers as a plain table instead
+of a third graph. The correlation math was cut along with the trend
+plots since there was no natural place for it in the new layout; the
+real finding it produced (below) is still worth keeping as project
+history even though the tool that made it no longer exists in that
+form.
+
+COOL THING: this is the first script in the project that reuses the
+other two scripts' *analysis logic* (attack/decay math, brightness/STFT
+math) without reusing their *code* directly -- copied the functions in
+rather than importing across sibling subproject folders, to keep
+compare/ self-contained the same way every other subproject folder is
+(matches the project's established one-folder-one-script pattern rather
+than introducing cross-folder coupling).
+
+REAL RESULT FROM THE RETIRED CORRELATION VERSION, run against all 48
+notes (kept as history, not reproducible in the current UI): pitch vs.
+decay time correlates
+at -0.78 (strong) -- higher notes decay faster, matching known piano
+physics and matching what showed up note-by-note earlier (section 5's
+6.6s-vs-1.5s spread). Pitch vs. brightness change correlates at only
++0.06 (essentially no linear trend) -- whether a note brightens a lot or
+a little over its duration does NOT depend much on how high or low it
+is, at least across octaves 2-5 mezzo-forte. That's a genuine finding
+from the tool, not an assumption baked into it.
+
+BUG CAUGHT WHILE BUILDING THIS: the SNR-gated brightness code (see
+section 2) threw a "divide by zero in log10" warning on some files --
+a frame with exactly zero energy (pure digital silence before the
+attack) produced log10(0). Harmless in effect (just becomes -inf, still
+correctly below any real threshold) but noisy. Fixed by flooring
+frame energy at a tiny epsilon before the divide, in both
+harmonics/main.py and compare/main.py.
 
 
 THINGS WORTH REMEMBERING GOING FORWARD
@@ -155,8 +314,28 @@ THINGS WORTH REMEMBERING GOING FORWARD
   overtones. Both analysis scripts are already tuned around this.
 - The router's plain-menu fallback under Git Bash/MSYS isn't cosmetic —
   it's a hang fix. Don't remove that check.
-- harmonics/main.py's HPS is deliberately limited to 3 harmonics; that
-  number came from testing against real notes, not a guess. Don't bump it
-  back up without re-testing against real samples.
-- Pedal/polyphonic resonance is an explicitly out-of-scope failure mode
-  for this project's current goal (single-note testing).
+- harmonics/main.py no longer does fundamental/note detection at all
+  (removed on request) -- it's timbre-over-time (spectrogram + spectral
+  centroid) now. Its noise-floor SNR gate (15dB above the pre-onset
+  floor) is load-bearing, not decorative -- without it, brightness
+  readings are dominated by noise as the note fades, not the real
+  timbre. Don't lower that threshold without re-checking against real
+  notes the way section 2's history describes.
+- Pedal/polyphonic resonance (the MAESTRO round's failure mode) is
+  explicitly out of scope for this project's goal.
+- Weak-fundamental octave errors on low bass notes (found on
+  piano_single_C2.wav / piano_single_G2.wav back when harmonics/main.py
+  did fundamental detection) is now moot -- that code path is gone. Only
+  relevant again if fundamental/note detection gets added back somewhere.
+- Kaggle datasets need an API token this environment doesn't have and
+  can't obtain interactively — don't assume Kaggle URLs are fetchable
+  the way plain HTTPS/GCS ones are. University of Iowa's sample archive
+  (theremin.music.uiowa.edu) needs no login and has full chromatic
+  coverage per instrument/dynamic -- default here if more notes/octaves
+  or other instruments are ever needed.
+- compare/main.py's pitch-sorting depends on filenames ending in a note
+  name (regex looks for e.g. "C4", "Db5" at the very end of the stem).
+  Files that don't match that pattern still get compared, just sorted
+  arbitrarily (sort_key falls back to 0) -- fine for now since every
+  file in Sample Recordings/ follows the naming convention, but worth
+  fixing if a differently-named dataset gets added later.
