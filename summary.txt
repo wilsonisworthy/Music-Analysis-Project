@@ -221,10 +221,47 @@ Source: the University of Iowa Electronic Music Studios instrument
 sample archive (theremin.music.uiowa.edu) — a long-standing, freely
 downloadable set of single-note instrument recordings used widely in
 audio research. Each note was recorded in isolation specifically for
-sampling purposes, at mezzo-forte dynamic. (The Kaggle "Piano Recordings
-Dataset" cited earlier would have been a more direct match, but Kaggle
-requires an account + API token to download even public datasets, which
-wasn't available in this session — Iowa's archive needs no login at all.)
+sampling purposes. (The Kaggle "Piano Recordings Dataset" cited earlier
+would have been a more direct match, but Kaggle requires an account + API
+token to download even public datasets, which wasn't available in this
+session — Iowa's archive needs no login at all.)
+
+UPDATE (2026-08-29): expanded from mezzo-forte-only to all three dynamic
+levels Iowa records piano at -- pp (pianissimo), mf (mezzo-forte), ff
+(fortissimo) -- same 48 notes at each, 144 files total. Goal: correlate
+strike force/speed with attack time, decay time, and brightness trend,
+working toward fitting an equation that predicts note properties from
+input force. Laid out as subfolders `Recordings/Sample Recordings/pp/`,
+`mf/`, `ff/`, each containing the same `piano_single_<note><octave>.wav`
+naming as before (existing mf files were moved in, not re-downloaded).
+Downloaded via `Piano.<dyn>.<note><octave>.aiff` under Iowa's
+`sound files/MIS/Piano_Other/piano/` path, same AIFF->WAV conversion and
+3%-of-peak RMS trim as the original import (buffer 0.3s, capped at 6s).
+No importer script was kept in the repo -- consistent with the original
+mf-only import, this was a one-off script run from the scratchpad and
+discarded, not a permanent subproject.
+
+UPDATE (2026-08-29, same day): the cross-dynamic gap above was closed.
+`_shared.py`'s select_wavs() now detects when a folder's immediate
+subfolders each hold same-named WAV files (a `_group_wavs_by_subdir()`
+helper) and, when that's true, adds an extra menu entry --
+"[ Select notes across ff, mf, pp here ]" -- generic, not hardcoded to
+those three names, so it'll pick up whatever sibling folder names exist.
+Picking a note there pulls it from every sibling folder at once instead of
+running compare three separate times. compare/main.py disambiguates same-
+named rows with their parent folder (e.g. "C4 (pp)" / "C4 (mf)" /
+"C4 (ff)") and sorts them together, softest-to-loudest (a DYNAMIC_ORDER
+lookup: pp<p<mp<mf<f<ff, unrecognized names sort after, alphabetically).
+Verified end-to-end (headless, mocked choose/choose_multi): selecting A2
+and C4 across all three dynamics in one run produced a correctly grouped,
+correctly labeled table, e.g. A2's attack time climbed 0.23s (pp) -> 0.46s
+(mf) -> 0.64s (ff) -- a real, visible force-vs-attack-time trend, exactly
+the kind of relationship the user wants to eventually fit an equation to.
+
+Still true: a batch script dumping all 144 files' attack/decay/brightness
+into one CSV would be a better fit than eyeballing compare's table once
+the user actually starts fitting a real force -> property equation --
+not built yet, only build it if asked.
 
 NITTY GRITTY: the raw files are AIFF format, not WAV, and are extremely
 long — around 13 to 74 seconds each, mostly natural decay tail trailing
@@ -339,3 +376,120 @@ THINGS WORTH REMEMBERING GOING FORWARD
   arbitrarily (sort_key falls back to 0) -- fine for now since every
   file in Sample Recordings/ follows the naming convention, but worth
   fixing if a differently-named dataset gets added later.
+
+
+7. REORGANIZATION + BATCH CSV EXPORT (2026-08-29)
+-----------------------------------------------------------------------
+Two changes, same day, both aimed at the user's stated end goal: fit an
+equation that predicts note properties (attack, decay, brightness) from
+input strike speed/force.
+
+REORGANIZATION: the two single-recording analyses got grouped into their
+own folder -- amplitude/ and harmonics/ moved from directly under
+subprojects/statistic_from_audio/ into subprojects/statistic_from_audio/
+single_note/amplitude/ and .../single_note/harmonics/. compare/ and the
+new csv_export/ (below), which both work across many recordings at once,
+stayed as siblings of single_note/ rather than getting nested into it.
+No code changes were needed for this move -- _shared.py's project-root
+discovery walks upward from wherever it's called from regardless of
+nesting depth, and the router already recurses into arbitrarily nested
+subproject folders. Verified both after moving (project root still
+resolves correctly, router menu tree shows single_note/{amplitude,
+harmonics}, compare/, csv_export/ as expected).
+
+NEW SUBPROJECT -- csv_export/: batch-runs the same attack/decay +
+brightness math (copied in, same self-contained-per-subproject pattern as
+compare/) over every .wav file found recursively under a chosen folder,
+and writes one row per file to a timestamped CSV under Results/ at the
+project root (columns: file, group [parent folder name, e.g. pp/mf/ff],
+note, octave, sample_rate_hz, duration_s, attack_time_s, decay_time_s,
+brightness_start_hz, brightness_end_hz, brightness_change_pct). No plots,
+no per-file interactive picking -- just progress lines and a final CSV,
+built for feeding into a regression/curve-fit later rather than reading by
+eye. Needed one small addition to _shared.py: select_folder(), which lets
+you stop the folder browse at any level (not just a leaf) via a
+"[ Use this folder ]" entry -- e.g. land on "Sample Recordings" itself to
+sweep pp/mf/ff and all 48 notes in one run. Synced to all four _shared.py
+copies (single_note/amplitude, single_note/harmonics, compare, csv_export)
+per the established "keep them identical" convention, even though only
+csv_export currently calls select_folder().
+
+Verified end-to-end (headless, mocked choose): ran csv_export against all
+of Sample Recordings/, all 144 files processed with zero failures, wrote
+144 rows to Results/Sample_Recordings_<timestamp>.csv. Spot-checked rows
+looked sane (e.g. piano_single_A2.wav in ff: attack 0.64s, decay 5.35s,
+brightness 875->1167 Hz). Results/ is NOT gitignored (unlike the .wav
+files) -- CSVs are the actual analysis output the user wants to keep and
+work with later, not disposable test data.
+
+FOLLOW-UP (same day): user noticed many pp rows had blank brightness
+columns and asked why. Root cause: the 15dB-above-noise-floor SNR gate
+(same one harmonics/compare use, deliberately not loosened -- see section
+6's "load-bearing" note) requires 3+ trusted STFT frames to fit a
+brightness trend at all; pp is the quietest dynamic by definition, so it's
+the one most likely to never clear that bar across the whole recording,
+especially in the bass (less energy per frame than treble). Confirmed by
+direct measurement: pp/piano_single_A2.wav's max SNR across the whole file
+never exceeds 11.6dB, 0/260 frames trusted -> blank. pp/piano_single_B2.wav
+barely clears it, 6/260 trusted -> a value, but a thin one.
+
+Fix (not loosening the threshold, which stays deliberately strict): added
+two columns, brightness_frames_trusted and brightness_frames_total, so a
+blank or thin brightness reading is visible as such instead of looking
+identical to a solid one. Re-verified against the real 144-file set after
+the change -- pp/A2 shows 0/260 (blank, as expected), pp/B2 shows 6/260
+(present but marginal), ff/A2 shows 200/260 (solid). Important for the
+regression work ahead: brightness being unmeasurable is NOT missing-at-
+random -- it's correlated with the low-force end of exactly the variable
+being studied, so blank rows shouldn't just be dropped without accounting
+for that bias (e.g. bass notes at pp will be systematically underrepresented
+in any brightness-vs-force fit unless this is handled deliberately).
+
+
+8. TREND-FINDING SUBPROJECT: Analysis/ (2026-08-29, same day)
+-----------------------------------------------------------------------
+User asked for a new subproject to actually look at the CSV data for
+trends -- explicitly named "Analysis". Design choice made and acted on
+without a separate confirmation round-trip (user had already committed to
+the folder): one figure, three side-by-side subplots (attack time, decay
+time, brightness change %), each plotting the metric against dynamic/force
+level. Each note gets its own thin line connecting its available pp/mf/ff
+points (colored by octave via a viridis colormap, so register effects are
+visible at a glance), plus a bold black dashed linear fit line and printed
+Pearson r per metric -- a first-pass numeric "equation" (y = slope*x +
+intercept) for how each property scales with force, which is the user's
+stated end goal. This is deliberately the "aggregate trend" style that got
+retired from compare/ earlier (section 6) -- that retirement was about
+compare/'s per-recording-detail purpose, not a rule against trend plots in
+general; Analysis/ is a dedicated tool for exactly the aggregate-trend
+case compare/ was pulled away from.
+
+Mechanics: select_csv() lists Results/*.csv sorted newest-first via the
+router's own choose() (auto-picks if only one exists), requires 2+ distinct
+"group" values in the CSV to plot at all (single-dynamic CSVs get a clear
+message instead of a meaningless single-point "trend"). Dynamic ordering
+reuses the same pp<mf<ff DYNAMIC_ORDER lookup as compare/main.py (copied
+in, self-contained per subproject as usual). Missing values (e.g. blank
+brightness cells from the SNR gate) are skipped per-note rather than
+crashing or zero-filling -- a note needs 2+ valid points to draw a line at
+all. No _shared.py needed for this one -- it never touches Recordings/,
+only Results/, so it just inlines _find_project_root() and imports choose()
+directly from the router.
+
+Verified against the real 144-row export (regenerated fresh since Results/
+had been cleaned up after prior testing): 3 groups found (pp, mf, ff);
+Attack time: n=144, r=+0.42 (attack gets slightly slower/later at higher
+force); Decay time: n=144, r=-0.59 (decays meaningfully faster at higher
+force -- the strongest relationship in the dataset); Brightness change:
+n=110 (34 rows dropped, consistent with section 7's SNR-gate gaps), r=-0.10
+(weak/near-flat). Sanity-checked the fit line itself wasn't a rendering
+bug -- pulled its raw Line2D data (xdata=[0,2], ydata=[0.373, 0.559] for
+attack time) to confirm it's a genuine straight 2-point fit; what looked
+like a kink in the rendered PNG was just visual crowding from ~48 overlapping
+thin note-lines, not an actual bend in the trend line.
+
+Caveat carried over from section 6/7: pp/mf/ff are still only 3 categorical
+force levels, so "linear fit" here is a straight line through group means,
+not a real regression against a continuous force variable -- good for
+spotting direction and rough magnitude, not a substitute for MAPS-style
+continuous-velocity data if the user wants to fit a precise equation later.

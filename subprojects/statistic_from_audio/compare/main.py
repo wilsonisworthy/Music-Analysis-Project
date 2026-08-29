@@ -4,6 +4,7 @@ which analysis to run, and see each recording's own plot(s) side by side
 numbers table underneath -- not another graph."""
 
 import re
+from collections import Counter
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -16,6 +17,15 @@ NOTE_SEMITONE = {
     "F#": 6, "Gb": 6, "G": 7, "G#": 8, "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11,
 }
 NOTE_PATTERN = re.compile(r"([A-Ga-g][b#]?)(-?\d+)$")
+
+# Known loudest-to-softest ordering so same-note rows land pp -> mf -> ff
+# instead of alphabetically; unrecognized folder names sort after these,
+# alphabetically among themselves.
+DYNAMIC_ORDER = {"pp": 0, "p": 1, "mp": 2, "mf": 3, "f": 4, "ff": 5}
+
+
+def dynamic_rank(folder_name):
+    return DYNAMIC_ORDER.get(folder_name.lower(), 99)
 
 
 def parse_pitch(stem):
@@ -142,24 +152,33 @@ def main():
     entries = []
     for sample_rate, data, path in recordings:
         sort_key, label = parse_pitch(path.stem)
-        entries.append((sort_key if sort_key is not None else 0, label, sample_rate, data))
-    entries.sort(key=lambda e: (e[0], e[1]))
+        entries.append((sort_key if sort_key is not None else 0, label, sample_rate, data, path))
+    entries.sort(key=lambda e: (e[0], e[1], dynamic_rank(e[4].parent.name), e[4].parent.name))
+
+    # Same note pulled from multiple dynamic-level subfolders (e.g. pp/mf/ff)
+    # would otherwise share an identical label -- disambiguate those with
+    # their parent folder name, e.g. "C4 (pp)" / "C4 (mf)" / "C4 (ff)".
+    label_counts = Counter(label for _, label, *_ in entries)
+
+    def display_label(label, path):
+        return f"{label} ({path.parent.name})" if label_counts[label] > 1 else label
 
     n_rows = len(entries)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(6.5 * n_cols, 3 * n_rows), squeeze=False)
 
     table_rows = []
-    for i, (_, label, sample_rate, data) in enumerate(entries):
+    for i, (_, label, sample_rate, data, path) in enumerate(entries):
+        disp = display_label(label, path)
         col = 0
         env = None
         trend = None
         if show_amp:
-            env = plot_amplitude(axes[i][col], sample_rate, data, label)
+            env = plot_amplitude(axes[i][col], sample_rate, data, disp)
             col += 1
         if show_harm:
-            trend = plot_harmonics(axes[i][col], sample_rate, data, label)
+            trend = plot_harmonics(axes[i][col], sample_rate, data, disp)
             col += 1
-        table_rows.append((label, env, trend))
+        table_rows.append((disp, env, trend))
 
     plt.tight_layout()
 
